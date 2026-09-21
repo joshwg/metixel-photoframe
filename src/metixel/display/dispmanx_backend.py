@@ -175,6 +175,11 @@ class Pi3dBackend(DisplayBackend):
         # the real monitor's native size (see ``_disable_empty_outputs``).
         self._disable_empty_outputs()
 
+        # Refuse to hand pi3d a compositor with NO output at all.  Without
+        # this, Xlib aborts the process on X_CreateWindow (BadValue 0x0)
+        # and nothing in Python ever gets to say why.
+        self._require_output()
+
         # Resolve GL_RGB constant — pi3d 2.50+ moved it to pi3d.constants
         global GPU_TEXTURE_FORMAT_GL_RGB
         try:
@@ -779,6 +784,34 @@ class Pi3dBackend(DisplayBackend):
         (see ``hardware.DisplayPower``).
         """
         self._display_power.set(on)
+
+    def _require_output(self) -> None:
+        """Raise a clear error when the compositor has no enabled output.
+
+        cage starts even when the kernel reports every HDMI connector as
+        ``disconnected`` (monitor off, unplugged, or on another input).  Its
+        XWayland root window is then 0x0, and pi3d's ``Display.create()``
+        dies inside Xlib with ``X Error … X_CreateWindow … 0x0`` — an
+        ``exit(1)`` that bypasses Python entirely, so the frontend log stays
+        empty and the dashboard can only say "no media playing".
+
+        Checking first turns that silent abort into a logged, deliberate
+        failure.  ``metixel-cage.service`` is ``Restart=always``, so raising
+        here is the retry mechanism: once a screen is connected the next
+        restart comes up normally.  A wlr-randr failure (``None``) is
+        *unknown*, not "no output", and never blocks startup.
+        """
+        enabled = self._wlr_output_mgr.enabled_outputs()
+        if enabled is None or enabled:
+            return
+        msg = (
+            "No display output is enabled — the compositor reports no monitor "
+            "on any HDMI port (unplugged, powered off, or on another input). "
+            "The frame cannot render until a screen is connected; the frontend "
+            "will keep retrying."
+        )
+        logger.error(msg)
+        raise RuntimeError(msg)
 
     def _disable_empty_outputs(self) -> None:
         """Disable Wayland outputs with no real monitor (no EDID).

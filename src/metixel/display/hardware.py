@@ -58,6 +58,60 @@ def _wlr_transform(rotation: int) -> str:
     return _WLR_TRANSFORMS.get(rotation, "normal")
 
 
+#: Default sysfs root for DRM connectors (``card1-HDMI-A-1`` etc.).
+_DRM_SYSFS = "/sys/class/drm"
+
+
+def drm_connector_status(sysfs_root: str = _DRM_SYSFS) -> dict[str, Any]:
+    """Report which physical display connectors have a monitor attached.
+
+    Reads the kernel's own hot-plug verdict from sysfs, so it works from the
+    sandboxed backend (no Wayland socket needed) and even while the frontend
+    cannot start at all.  That is the point: when cage comes up with **no**
+    output, XWayland's root window is 0x0 and pi3d dies inside Xlib before
+    any Python code can log a reason — the only honest "no screen" signal
+    left is this one.
+
+    Returns ``{"available": bool, "connected": bool | None, "connectors": [...]}``
+    where each connector is ``{"name", "status", "edid"}``.  ``connected`` is
+    ``None`` (unknown) when sysfs exposes no display connectors at all
+    (desktop development, a container), never ``False`` — a missing probe
+    must not be mistaken for an unplugged monitor.  Writeback connectors are
+    virtual and skipped.
+    """
+    connectors: list[dict[str, Any]] = []
+    try:
+        entries = sorted(os.listdir(sysfs_root))
+    except OSError:
+        entries = []
+    for entry in entries:
+        # "card1-HDMI-A-1" → connector; "card1" / "renderD128" → not
+        if "-" not in entry or not entry.startswith("card"):
+            continue
+        name = entry.split("-", 1)[1]
+        if name.startswith("Writeback"):
+            continue
+        base = os.path.join(sysfs_root, entry)
+        try:
+            with open(os.path.join(base, "status"), encoding="utf-8") as f:
+                status = f.read().strip() or "unknown"
+        except OSError:
+            continue
+        try:
+            has_edid = os.path.getsize(os.path.join(base, "edid")) > 0
+        except OSError:
+            has_edid = False
+        connectors.append({"name": name, "status": status, "edid": has_edid})
+
+    if not connectors:
+        return {"available": False, "connected": None, "connectors": []}
+    return {
+        "available": True,
+        "connected": any(c["status"] == "connected" for c in connectors),
+        "connectors": connectors,
+    }
+
+
 class GpuInfo:
     """GPU memory introspection with a short-TTL cache.
 
@@ -274,6 +328,39 @@ class WlrOutput:
             )
             return name
         return None
+
+    @staticmethod
+    def enabled_outputs() -> list[str] | None:
+        """Names of the outputs the compositor currently has enabled.
+
+        Returns ``None`` when wlr-randr is unavailable or fails (unknown —
+        callers must treat that as "proceed as before"), and ``[]`` when the
+        compositor genuinely has no enabled output.  The latter is what cage
+        reports when no monitor is detected on any HDMI port: XWayland's
+        root window is then 0x0 and pi3d cannot create a surface.
+        """
+        if not os.path.exists(_WLR_BIN):
+            return None
+        try:
+            result = subprocess.run(
+                [_WLR_BIN, "--json"],
+                capture_output=True,
+                timeout=5,
+                env=_WLR_ENV,
+            )
+            if result.returncode != 0:
+                return None
+            outputs = json.loads(result.stdout.decode(errors="replace") or "[]")
+        except Exception:
+            logger.debug("Could not enumerate enabled outputs", exc_info=True)
+            return None
+        if not isinstance(outputs, list):
+            return None
+        return [
+            o["name"]
+            for o in outputs
+            if isinstance(o, dict) and o.get("enabled") and isinstance(o.get("name"), str)
+        ]
 
     def list_modes(self) -> list[dict[str, Any]]:
         """Return the real monitor's supported modes from wlr-randr.

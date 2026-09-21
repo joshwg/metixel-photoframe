@@ -73,6 +73,15 @@ def health_check():
     liveness = _frontend_liveness(daemon)
     health["liveness"] = {"frontend": liveness}
 
+    # Physical monitor presence (kernel hot-plug state via sysfs).  Read here,
+    # in the backend, precisely because the frontend cannot report it: with
+    # no connector the renderer dies inside Xlib before it can log anything.
+    health["monitor"] = _monitor_status()
+
+    # One human-readable answer to "why is nothing playing?" for the
+    # dashboard's Now Playing card (and anything else that wants it).
+    health["playback"] = _playback_verdict(health)
+
     required = _required_checks()
     # Fail-closed on the strict form: "require render" means a live renderer is
     # required, so anything other than a demonstrated `alive is True` fails —
@@ -91,6 +100,73 @@ def health_check():
         health["unhealthy_checks"] = unhealthy
         return jsonify(health), 503
     return jsonify(health)
+
+
+def _monitor_status() -> dict[str, Any]:
+    """Return the DRM connector probe, degrading to "unknown" on any error."""
+    try:
+        from metixel.display.hardware import drm_connector_status
+
+        return drm_connector_status()
+    except Exception:  # pragma: no cover - defensive, never break /health
+        logger.debug("Could not probe display connectors", exc_info=True)
+        return {"available": False, "connected": None, "connectors": []}
+
+
+def _playback_verdict(health: dict[str, Any]) -> dict[str, str]:
+    """Explain the frame's playback state in one line.
+
+    ``state`` is one of ``playing`` | ``paused`` | ``no_monitor`` |
+    ``frontend_down`` | ``frontend_starting`` | ``no_media`` | ``waiting``.
+    The checks run from the outside in — no screen first, then no renderer,
+    then no media — so the reason shown is the one the user can act on.
+    """
+    current = health.get("current_media")
+    if isinstance(current, dict) and current.get("file"):
+        if current.get("paused"):
+            return {"state": "paused", "reason": "Slideshow is paused."}
+        return {"state": "playing", "reason": ""}
+
+    monitor = health.get("monitor") or {}
+    if monitor.get("connected") is False:
+        names = ", ".join(c.get("name", "?") for c in monitor.get("connectors", []))
+        return {
+            "state": "no_monitor",
+            "reason": (
+                f"No monitor detected on {names or 'any HDMI port'} — check the HDMI "
+                "cable, that the screen is powered on, and that it is set to this input."
+            ),
+        }
+
+    frontend = (health.get("liveness") or {}).get("frontend") or {}
+    fe_state = frontend.get("state")
+    fe_reason = frontend.get("reason") or "no heartbeat"
+    if fe_state in ("missing", "stale", "churning"):
+        return {
+            "state": "frontend_down",
+            "reason": (
+                f"The display renderer is not running ({fe_reason}). "
+                "Check the Logs page or run: journalctl -u metixel-cage"
+            ),
+        }
+    if fe_state == "starting":
+        return {
+            "state": "frontend_starting",
+            "reason": f"Display renderer is starting ({fe_reason}).",
+        }
+
+    total = int(health.get("playlist_image_count") or 0) + int(
+        health.get("playlist_video_count") or 0
+    )
+    if total == 0:
+        return {
+            "state": "no_media",
+            "reason": "The playlist is empty — add media or wait for processing to finish.",
+        }
+    return {
+        "state": "waiting",
+        "reason": "Display renderer is running but has not shown a slide yet.",
+    }
 
 
 def _required_checks() -> list[str]:

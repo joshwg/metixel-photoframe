@@ -98,6 +98,14 @@ neither header (curl, tests, the frontend's loopback signal) are allowed.
     - `liveness.frontend` — `{alive, state, reason, age_seconds, pid, boot_id}`
       where `state` is `alive` | `starting` | `churning` | `stale` | `missing`
       | `unknown`.  `alive` is `null` when tracking is unavailable.
+    - `monitor` — `{available, connected, connectors}`: the kernel's
+      hot-plug verdict for the physical display connectors, read from
+      `/sys/class/drm/card*-HDMI-A-*/status`.  `connected` is `null` when
+      sysfs exposes no connectors (desktop), never a false "unplugged".
+    - `playback` — `{state, reason}`: one line explaining why nothing is on
+      screen.  `state` is `playing` | `paused` | `no_monitor` |
+      `frontend_down` | `frontend_starting` | `no_media` | `waiting`; the
+      dashboard's Now Playing card shows `reason` verbatim.
     - `healthy` / `status` — the overall verdict for the *requested* checks.
     - `required` — the checks this request enforced (`[]` by default).
     - `unhealthy_checks` — present only on a `503`.

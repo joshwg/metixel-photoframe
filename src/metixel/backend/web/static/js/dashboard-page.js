@@ -181,12 +181,19 @@ import {
 
                 fileEl.innerHTML = '<strong>' + escapeHtml(cm.file) + '</strong>' + pausedBadge;
                 statusEl.textContent = mediaLabel + ' ' + (cm.index + 1) + ' of ' + cm.total;
+                statusEl.style.color = "var(--text-muted)";
             } else {
                 // No media — hide the image but keep the preview container
                 // so the card height stays stable
                 if (thumbEl) { thumbEl.removeAttribute("src"); thumbEl.style.display = "none"; }
                 fileEl.innerHTML = '<span style="color:var(--text-muted)">No media playing</span>';
-                statusEl.textContent = "";
+                // Say WHY — the backend works it out (no monitor detected,
+                // renderer not running, empty playlist) so the user is not
+                // left guessing between a cable, a crash, and an empty folder.
+                var pb = health.playback || {};
+                var blocking = pb.state === "no_monitor" || pb.state === "frontend_down";
+                statusEl.textContent = pb.reason || "";
+                statusEl.style.color = blocking ? "var(--danger)" : "var(--text-muted)";
             }
         }
 
